@@ -21,7 +21,7 @@ jobs:
         run: pip install requests beautifulsoup4 ics
 
       - name: Run generator
-        run: python generate_ics.py
+        run: python generate_bba_ics.py
 
       - name: Commit generated .ics
         run: |
