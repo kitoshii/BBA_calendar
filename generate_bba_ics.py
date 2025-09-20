@@ -1,14 +1,18 @@
 # generate_ics.py
+import os
+import sys
+import traceback
+from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs, unquote_plus
 from ics import Calendar, Event
-from datetime import datetime
-import os
+
 
 URL = "https://arkbolingbrokeacademy.org/calendar"
 OUT_ICS = "calendar.ics"
 TIMEZONE = "UTC"  # page used UTC template links; adjust if needed
+DEBUG=1
 
 def parse_google_template_href(href):
     # Example href contains:
@@ -59,15 +63,33 @@ def main():
 
             e = Event()
             e.name = title
-            # If the start and end are the same midnight times, treat as all-day for that date
-            # many school events are whole-day; ics lib accepts datetimes too
-            e.begin = start
-            # for all-day events Google sometimes uses same start/end midnight:
-            # make end one day after for all-day semantics if times are midnight and equal
-            if start and end and start == end and start.time().hour == 0 and start.time().minute == 0:
-                e.end = end  # leave as-is; consumer may treat as zero-length; you may add +1 day if desired
+
+            # Convert start/end to all-day if appropriate
+            if start and end:
+                # Case 1: start == end at midnight → all-day single-day
+                if DEBUG:
+                    print(f"Event: {title} | {start} to {end}")
+                if start == end and start.hour == 0 and end.hour == 0:
+                    if DEBUG:
+                        print(f"{title}  -> all-day single-day")
+                    e.begin = start.date()       # date-only
+                    e.make_all_day()
+                    e.end = e.begin + timedelta(days=1)
+                # Case 2: multi-day events → make all-day
+                elif end.date() > start.date():
+                    if DEBUG:
+                        print(f"{title}  -> all-day multi-day")
+                    e.begin = start.date()
+                    e.make_all_day()
+                    # DTEND is exclusive: one day after last day
+                    e.end = end.date() + timedelta(days=1)
+                else:
+                    e.begin = start
+                    e.end = end
             else:
+                e.begin = start
                 e.end = end
+
             cal.events.add(e)
 
     with open(OUT_ICS, "w", encoding="utf-8") as f:
