@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+ics==0.7.2
+tatsu==5.16.0
+
+
+
