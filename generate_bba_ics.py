@@ -73,14 +73,14 @@ def main():
                     if DEBUG:
                         print(f"{title}  -> all-day single-day")
                     e.begin = start.date()       # date-only
-                    e.make_all_day()
+                    #e.make_all_day()
                     e.end = e.begin + timedelta(days=1)
                 # Case 2: multi-day events → make all-day
                 elif end.date() > start.date():
                     if DEBUG:
                         print(f"{title}  -> all-day multi-day")
                     e.begin = start.date()
-                    e.make_all_day()
+                    #e.make_all_day()
                     # DTEND is exclusive: one day after last day
                     e.end = end.date() + timedelta(days=1)
                 else:
