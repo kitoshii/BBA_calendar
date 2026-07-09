@@ -2,6 +2,7 @@ requests==2.34.2
 beautifulsoup4==4.15.0
 ics==0.7.2
 tatsu==5.16.0
+pypdf==6.14.2
 
 
 

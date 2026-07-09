@@ -1,98 +1,167 @@
 # generate_ics.py
-import os
+import io
+import re
 import sys
-import traceback
-from datetime import datetime, timedelta
+from datetime import date, timedelta
+from urllib.parse import urljoin
+
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs, unquote_plus
+from pypdf import PdfReader
 from ics import Calendar, Event
 
-
-URL = "https://arkbolingbrokeacademy.org/calendar"
+TERM_DATES_URL = "https://arkbolingbrokeacademy.org/calendar/term-dates"
 OUT_ICS = "calendar.ics"
-TIMEZONE = "UTC"  # page used UTC template links; adjust if needed
-DEBUG=1
+DEBUG = 1
 
-def parse_google_template_href(href):
-    # Example href contains:
-    # ...calendar/render?action=TEMPLATE&ctz=UTC&dates=20251017T000000%2F20251017T000000&text=Network+INSET+day...
-    q = parse_qs(urlparse(href).query)
-    dates = q.get("dates", [""])[0]
-    text = q.get("text", [""])[0]
-    # decode pluses/percent encoding
-    text = unquote_plus(text)
-    return dates, text
+MONTHS = {
+    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
+    "July": 7, "August": 8, "September": 9, "October": 10, "November": 11, "December": 12,
+}
+WEEKDAYS = "Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday"
+WEEKDAY_RE = re.compile(rf"\b(?:{WEEKDAYS})\b")
+DATE_TOKEN_RE = re.compile(
+    rf"\b(?:{WEEKDAYS})\s+(\d{{1,2}})(?:st|nd|rd|th)"
+    rf"(?:\s+({'|'.join(MONTHS)}))?"
+    rf"(?:\s+(\d{{4}}))?"
+)
+AT_TIME_RE = re.compile(r"\bat\s+(\d{1,2}:\d{2}\s*[ap]m)\b", re.IGNORECASE)
+TRAILING_PAREN_RE = re.compile(r"\(([^)]+)\)\s*$")
+SECTION_HEADER_RE = re.compile(r"^[A-Z][A-Z ]+TERM$")
 
-def parse_dates_field(dates_str):
-    # dates_str examples:
-    # 1) 20251017T000000/20251017T000000
-    # 2) 20251027/20251031  (maybe)
-    if "/" not in dates_str:
-        return None, None
-    start_s, end_s = dates_str.split("/", 1)
 
-    def to_dt(s):
-        # YYYYMMDDTHHMMSS or YYYYMMDD
-        if "T" in s:
-            return datetime.strptime(s, "%Y%m%dT%H%M%S")
-        else:
-            return datetime.strptime(s, "%Y%m%d")
-    start = to_dt(start_s)
-    end = to_dt(end_s)
-    return start, end
+def find_pdf_links(html):
+    soup = BeautifulSoup(html, "html.parser")
+    links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.lower().endswith(".pdf") and "term" in href.lower():
+            links.append(urljoin(TERM_DATES_URL, href))
+    return links
 
-def main():
-    r = requests.get(URL, timeout=20)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
 
+def extract_pdf_text(pdf_bytes):
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def parse_date_tokens(segment):
+    # Ranges often omit the month/year on the first date, e.g.
+    # "Monday 15th - Friday 19th February 2027" -> inherit from the last token.
+    tokens = []
+    for m in DATE_TOKEN_RE.finditer(segment):
+        day, month, year = m.groups()
+        tokens.append([int(day), month, int(year) if year else None])
+    for i in range(len(tokens) - 2, -1, -1):
+        if tokens[i][1] is None:
+            tokens[i][1] = tokens[i + 1][1]
+        if tokens[i][2] is None:
+            tokens[i][2] = tokens[i + 1][2]
+    return tokens
+
+
+def parse_term_dates_text(text):
+    """Parse a Bolingbroke Academy term-dates PDF's extracted text into
+    (title, start_date, end_date_inclusive) tuples."""
+    events = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if SECTION_HEADER_RE.match(line):
+            continue
+        if line.startswith("Bolingbroke Academy") or line.startswith("Information for"):
+            continue
+        if "tbc" in line.lower():
+            # Provisional lines (A Level / GCSE results days) - not real dates yet.
+            if DEBUG:
+                print(f"Skipping provisional line: {line!r}")
+            continue
+
+        first_wd = WEEKDAY_RE.search(line)
+        if not first_wd:
+            # Continuation line, e.g. "Years 7 and 12 only" qualifying the
+            # event on the line above.
+            if events:
+                title, s, e = events[-1]
+                events[-1] = (f"{title} ({line})", s, e)
+            elif DEBUG:
+                print(f"Ignoring unrecognized line: {line!r}")
+            continue
+
+        label = line[:first_wd.start()].strip()
+        date_expr = line[first_wd.start():]
+
+        notes = []
+        at_match = AT_TIME_RE.search(date_expr)
+        if at_match:
+            notes.append(f"dismissal at {at_match.group(1)}")
+            date_expr = date_expr[:at_match.start()]
+        paren_match = TRAILING_PAREN_RE.search(date_expr)
+        if paren_match:
+            notes.append(paren_match.group(1))
+            date_expr = date_expr[:paren_match.start()]
+
+        tokens = parse_date_tokens(date_expr)
+        if not tokens:
+            print(f"WARNING: could not parse date for line: {line!r}", file=sys.stderr)
+            continue
+
+        try:
+            start = date(tokens[0][2], MONTHS[tokens[0][1]], tokens[0][0])
+            end = date(tokens[-1][2], MONTHS[tokens[-1][1]], tokens[-1][0])
+        except (KeyError, TypeError, ValueError) as exc:
+            print(f"WARNING: bad date tokens for line: {line!r} ({exc})", file=sys.stderr)
+            continue
+
+        title = f"{label} ({'; '.join(notes)})" if notes else label
+        events.append((title, start, end))
+    return events
+
+
+def build_calendar(events):
     cal = Calendar()
     seen = set()
+    for title, start, end in events:
+        key = f"{title}|{start}|{end}"
+        if key in seen:
+            continue
+        seen.add(key)
 
-    for a in soup.find_all("a", href=True):
-        if "calendar.google.com/calendar/render" in a["href"] and "action=TEMPLATE" in a["href"]:
-            dates_str, title = parse_google_template_href(a["href"])
-            if not dates_str or not title:
-                continue
-            start, end = parse_dates_field(dates_str)
-            key = f"{title}|{dates_str}"
-            if key in seen:
-                continue
-            seen.add(key)
+        e = Event()
+        e.name = title
+        e.begin = start
+        e.make_all_day()
+        # DTEND is exclusive: one day after the last inclusive day.
+        e.end = end + timedelta(days=1)
+        assert e.all_day, f"{title} failed to become an all-day event"
+        cal.events.add(e)
+    return cal
 
-            e = Event()
-            e.name = title
 
-            # Every event on this site's calendar page is a whole-day concept
-            # (INSET days, term dates, holidays) — the Google Calendar links
-            # always encode them as midnight-to-midnight timestamps, never a
-            # genuine time of day. Treat them as all-day based on the date
-            # portion alone so stray time components can't turn them into a
-            # 24h-long *timed* event (which some calendar apps then render
-            # shifted by the viewer's UTC offset, e.g. "1am to 1am").
-            if start and end:
-                if DEBUG:
-                    print(f"Event: {title} | {start} to {end}")
-                start_date = start.date()
-                end_date = end.date()
-                e.begin = start_date
-                e.make_all_day()
-                # DTEND is exclusive: one day after the last inclusive day.
-                # Set it explicitly even for single-day events so DTEND is
-                # always present in the output.
-                last_day = end_date if end_date > start_date else start_date
-                e.end = last_day + timedelta(days=1)
-                assert e.all_day, f"{title} failed to become an all-day event"
-            else:
-                e.begin = start
-                e.end = end
+def main():
+    r = requests.get(TERM_DATES_URL, timeout=20)
+    r.raise_for_status()
+    pdf_urls = find_pdf_links(r.text)
+    if not pdf_urls:
+        raise RuntimeError("No term-dates PDF links found on the page")
 
-            cal.events.add(e)
+    all_events = []
+    for url in pdf_urls:
+        if DEBUG:
+            print(f"Fetching {url}")
+        pr = requests.get(url, timeout=20)
+        pr.raise_for_status()
+        events = parse_term_dates_text(extract_pdf_text(pr.content))
+        if DEBUG:
+            print(f"  -> {len(events)} events")
+        all_events.extend(events)
 
+    cal = build_calendar(all_events)
     with open(OUT_ICS, "w", encoding="utf-8") as f:
         f.writelines(cal)
     print(f"Wrote {OUT_ICS} ({len(cal.events)} events)")
+
 
 if __name__ == "__main__":
     main()
