@@ -64,28 +64,26 @@ def main():
             e = Event()
             e.name = title
 
-            # Convert start/end to all-day if appropriate
+            # Every event on this site's calendar page is a whole-day concept
+            # (INSET days, term dates, holidays) — the Google Calendar links
+            # always encode them as midnight-to-midnight timestamps, never a
+            # genuine time of day. Treat them as all-day based on the date
+            # portion alone so stray time components can't turn them into a
+            # 24h-long *timed* event (which some calendar apps then render
+            # shifted by the viewer's UTC offset, e.g. "1am to 1am").
             if start and end:
-                # Case 1: start == end at midnight → all-day single-day
                 if DEBUG:
                     print(f"Event: {title} | {start} to {end}")
-                if start == end and start.hour == 0 and end.hour == 0:
-                    if DEBUG:
-                        print(f"{title}  -> all-day single-day")
-                    e.begin = start.date()       # date-only
-                    #e.make_all_day()
-                    e.end = e.begin + timedelta(days=1)
-                # Case 2: multi-day events → make all-day
-                elif end.date() > start.date():
-                    if DEBUG:
-                        print(f"{title}  -> all-day multi-day")
-                    e.begin = start.date()
-                    #e.make_all_day()
-                    # DTEND is exclusive: one day after last day
-                    e.end = end.date() + timedelta(days=1)
-                else:
-                    e.begin = start
-                    e.end = end
+                start_date = start.date()
+                end_date = end.date()
+                e.begin = start_date
+                e.make_all_day()
+                # DTEND is exclusive: one day after the last inclusive day.
+                # Set it explicitly even for single-day events so DTEND is
+                # always present in the output.
+                last_day = end_date if end_date > start_date else start_date
+                e.end = last_day + timedelta(days=1)
+                assert e.all_day, f"{title} failed to become an all-day event"
             else:
                 e.begin = start
                 e.end = end
