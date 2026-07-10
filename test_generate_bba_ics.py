@@ -5,7 +5,16 @@ output matches exactly. If the school changes the PDF's wording/layout,
 this should fail loudly instead of the calendar silently going stale or
 producing garbage dates.
 """
-from generate_bba_ics import extract_pdf_text, parse_term_dates_text, build_calendar
+from datetime import date
+
+from generate_bba_ics import (
+    academic_year_window,
+    build_calendar,
+    extract_pdf_text,
+    find_pdf_links,
+    parse_pdf,
+    parse_term_dates_text,
+)
 
 EXPECTED_2025_26 = [
     ('Autumn term 1 starts (Years 7 and 12 only)', '2025-09-03', '2025-09-03'),
@@ -75,7 +84,8 @@ EXPECTED_2026_27 = [
 def parse_fixture(path):
     with open(path, "rb") as f:
         text = extract_pdf_text(f.read())
-    events = parse_term_dates_text(text)
+    events, warnings = parse_term_dates_text(text)
+    assert not warnings, f"{path}: unexpected parse warnings: {warnings}"
     return [(title, s.isoformat(), e.isoformat()) for title, s, e in events]
 
 
@@ -88,17 +98,54 @@ def check(path, expected):
     )
     print(f"OK: {path} ({len(actual)} events match)")
 
+    # parse_pdf() wraps the same parsing with sanity checks - it should
+    # accept these known-good real documents without raising.
+    with open(path, "rb") as f:
+        events = parse_pdf(f.read(), path)
+    assert len(events) == len(expected)
+    print(f"OK: {path} passes parse_pdf() sanity checks")
+
 
 def check_all_day_output():
-    events = [("Test Day", __import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 1, 1))]
+    events = [("Test Day", date(2026, 1, 1), date(2026, 1, 1))]
     cal = build_calendar(events)
     (event,) = cal.events
     assert event.all_day, "build_calendar produced a non-all-day event"
     print("OK: build_calendar produces all-day events")
 
 
+def check_unparseable_line_warns():
+    # Has a day-ordinal token but no month/year to inherit from anywhere.
+    events, warnings = parse_term_dates_text("Some Event   Monday 15th\n")
+    assert warnings, "expected a warning for a date-like line missing month/year"
+    print("OK: unparseable lines are reported as warnings")
+
+
+def check_academic_year_window():
+    window = academic_year_window("Bolingbroke Academy: Term dates 2027-2028\n")
+    assert window == (date(2027, 8, 1), date(2028, 9, 30)), window
+    assert academic_year_window("no heading here") is None
+    print("OK: academic_year_window extracts the year range from the PDF heading")
+
+
+def check_find_pdf_links_matches_href_or_text():
+    html = """
+    <a href="/files/2028-05/dates.pdf">Term Dates 2028-29 (12 KB)</a>
+    <a href="/files/2029-05/BOL%20Term%20Dates%202029-30.pdf">Download (15 KB)</a>
+    <a href="/files/other.pdf">Unrelated document</a>
+    """
+    links = find_pdf_links(html)
+    assert len(links) == 2, links
+    assert any("dates.pdf" in l for l in links)
+    assert any("Term%20Dates%202029-30" in l for l in links)
+    print("OK: find_pdf_links matches on href OR link text")
+
+
 if __name__ == "__main__":
     check("tests/fixtures/term-dates-2025-26.pdf", EXPECTED_2025_26)
     check("tests/fixtures/term-dates-2026-27.pdf", EXPECTED_2026_27)
     check_all_day_output()
+    check_unparseable_line_warns()
+    check_academic_year_window()
+    check_find_pdf_links_matches_href_or_text()
     print("All tests passed.")
