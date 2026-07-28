@@ -2,6 +2,7 @@
 import io
 import re
 import sys
+import time
 from datetime import date, timedelta
 from urllib.parse import urljoin
 
@@ -13,6 +14,54 @@ from ics import Calendar, Event
 TERM_DATES_URL = "https://arkbolingbrokeacademy.org/calendar/term-dates"
 OUT_ICS = "calendar.ics"
 DEBUG = 1
+
+# The school's site (Pantheon/Fastly) occasionally 403s requests carrying the
+# default python-requests UA - it looks like bot-detection aimed at scrapers
+# rather than anything scraper-specific to us, and it's been seen to clear up
+# on retry. A browser-like UA plus a couple of retries covers both cases
+# without masking a genuine, persistent block.
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-GB,en;q=0.9",
+}
+RETRYABLE_STATUS_CODES = {403, 429, 500, 502, 503, 504}
+MAX_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 5
+
+
+def fetch(url):
+    """GET url, retrying transient-looking failures (403/429/5xx) a few
+    times before giving up, since the target has been observed to reject a
+    request then accept an identical retry moments later."""
+    last_exc = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            r = requests.get(url, headers=REQUEST_HEADERS, timeout=20)
+            if r.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_ATTEMPTS:
+                print(
+                    f"Fetch of {url} returned {r.status_code} on attempt "
+                    f"{attempt}/{MAX_ATTEMPTS}, retrying...",
+                    file=sys.stderr,
+                )
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+                continue
+            r.raise_for_status()
+            return r
+        except requests.exceptions.RequestException as exc:
+            last_exc = exc
+            if attempt < MAX_ATTEMPTS:
+                print(
+                    f"Fetch of {url} failed on attempt {attempt}/{MAX_ATTEMPTS} "
+                    f"({exc}), retrying...",
+                    file=sys.stderr,
+                )
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+    raise last_exc
+
 
 # Below this, assume the PDF's layout changed and we mostly failed to parse
 # it, rather than that the school genuinely only listed a handful of dates.
@@ -221,8 +270,7 @@ def parse_pdf(pdf_bytes, source):
 
 
 def main():
-    r = requests.get(TERM_DATES_URL, timeout=20)
-    r.raise_for_status()
+    r = fetch(TERM_DATES_URL)
     pdf_urls = find_pdf_links(r.text)
     if not pdf_urls:
         raise RuntimeError("No term-dates PDF links found on the page")
@@ -231,8 +279,7 @@ def main():
     for url in pdf_urls:
         if DEBUG:
             print(f"Fetching {url}")
-        pr = requests.get(url, timeout=20)
-        pr.raise_for_status()
+        pr = fetch(url)
         events = parse_pdf(pr.content, url)
         if DEBUG:
             print(f"  -> {len(events)} events")
