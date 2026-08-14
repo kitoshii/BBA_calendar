@@ -9,6 +9,7 @@ from datetime import date
 
 from generate_bba_ics import (
     academic_year_window,
+    add_summer_holidays,
     build_calendar,
     extract_pdf_text,
     find_pdf_links,
@@ -128,6 +129,44 @@ def check_academic_year_window():
     print("OK: academic_year_window extracts the year range from the PDF heading")
 
 
+def check_add_summer_holidays():
+    events = [
+        ("Summer term 2 ends (dismissal at 12:35pm)", date(2026, 7, 16), date(2026, 7, 16)),
+        ("Autumn term 1 starts (Years 7 and 12 only)", date(2026, 9, 7), date(2026, 9, 7)),
+        ("Autumn term 1 starts (All year groups)", date(2026, 9, 8), date(2026, 9, 8)),
+    ]
+    result = add_summer_holidays(events)
+    assert len(result) == len(events) + 1, result
+    title, start, end = result[-1]
+    assert title == "Summer holidays", title
+    assert start == date(2026, 7, 17), start
+    assert end == date(2026, 9, 6), end
+    print("OK: add_summer_holidays bridges summer term end to next autumn term start")
+
+    # No later autumn start to bridge to (e.g. the most recent PDF's summer
+    # term) - should be left alone, not raise or fabricate a date.
+    no_bridge = [("Summer term 2 ends", date(2027, 7, 20), date(2027, 7, 20))]
+    assert add_summer_holidays(no_bridge) == no_bridge
+    print("OK: add_summer_holidays leaves unbridgeable summer ends alone")
+
+
+def check_add_summer_holidays_across_real_fixtures():
+    events_2025_26, warnings_a = parse_term_dates_text(
+        extract_pdf_text(open("tests/fixtures/term-dates-2025-26.pdf", "rb").read())
+    )
+    events_2026_27, warnings_b = parse_term_dates_text(
+        extract_pdf_text(open("tests/fixtures/term-dates-2026-27.pdf", "rb").read())
+    )
+    assert not warnings_a and not warnings_b
+
+    combined = add_summer_holidays(events_2025_26 + events_2026_27)
+    summer_holidays = [(t, s, e) for t, s, e in combined if t == "Summer holidays"]
+    assert summer_holidays == [
+        ("Summer holidays", date(2026, 7, 17), date(2026, 9, 6)),
+    ], summer_holidays
+    print("OK: add_summer_holidays bridges the real 2025-26 -> 2026-27 fixtures")
+
+
 def check_find_pdf_links_matches_href_or_text():
     html = """
     <a href="/files/2028-05/dates.pdf">Term Dates 2028-29 (12 KB)</a>
@@ -147,5 +186,7 @@ if __name__ == "__main__":
     check_all_day_output()
     check_unparseable_line_warns()
     check_academic_year_window()
+    check_add_summer_holidays()
+    check_add_summer_holidays_across_real_fixtures()
     check_find_pdf_links_matches_href_or_text()
     print("All tests passed.")

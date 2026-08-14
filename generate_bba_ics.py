@@ -215,6 +215,32 @@ def parse_term_dates_text(text):
     return events, warnings
 
 
+SUMMER_TERM_END_PREFIX = "Summer term 2 ends"
+AUTUMN_TERM_START_PREFIX = "Autumn term 1 starts"
+
+
+def add_summer_holidays(events):
+    """Synthesize a "Summer holidays" event between each summer term's end
+    and the following academic year's first day of autumn term.
+
+    Unlike the other inter-term breaks (Christmas, Easter, half terms),
+    the school's PDF never lists the summer holiday explicitly, so it has
+    to be derived by bridging the end of one academic year's PDF to the
+    start of the next.
+    """
+    summer_ends = [e for title, s, e in events if title.startswith(SUMMER_TERM_END_PREFIX)]
+    autumn_starts = [s for title, s, e in events if title.startswith(AUTUMN_TERM_START_PREFIX)]
+
+    holidays = []
+    for end in summer_ends:
+        later_starts = [s for s in autumn_starts if s > end]
+        if not later_starts:
+            continue
+        next_start = min(later_starts)
+        holidays.append(("Summer holidays", end + timedelta(days=1), next_start - timedelta(days=1)))
+    return events + holidays
+
+
 def build_calendar(events):
     cal = Calendar()
     seen = set()
@@ -285,6 +311,7 @@ def main():
             print(f"  -> {len(events)} events")
         all_events.extend(events)
 
+    all_events = add_summer_holidays(all_events)
     cal = build_calendar(all_events)
     with open(OUT_ICS, "w", encoding="utf-8") as f:
         f.writelines(cal)
