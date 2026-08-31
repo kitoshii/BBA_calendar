@@ -5,6 +5,8 @@ output matches exactly. If the school changes the PDF's wording/layout,
 this should fail loudly instead of the calendar silently going stale or
 producing garbage dates.
 """
+import os
+import tempfile
 from datetime import date
 
 from generate_bba_ics import (
@@ -13,6 +15,8 @@ from generate_bba_ics import (
     build_calendar,
     extract_pdf_text,
     find_pdf_links,
+    load_known_summer_holidays,
+    merge_known_summer_holidays,
     parse_pdf,
     parse_term_dates_text,
 )
@@ -167,6 +171,37 @@ def check_add_summer_holidays_across_real_fixtures():
     print("OK: add_summer_holidays bridges the real 2025-26 -> 2026-27 fixtures")
 
 
+def check_load_and_merge_known_summer_holidays():
+    events = [("Summer holidays", date(2026, 7, 17), date(2026, 9, 6))]
+    cal = build_calendar(events)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".ics", delete=False) as f:
+        f.writelines(cal)
+        path = f.name
+    try:
+        known = load_known_summer_holidays(path)
+        assert known == events, known
+        print("OK: load_known_summer_holidays recovers a previously-written Summer holidays event")
+
+        assert load_known_summer_holidays(path + ".missing") == []
+        print("OK: load_known_summer_holidays returns [] when there's no prior file")
+
+        # A fresh run with no re-derived summer holiday for that start date
+        # should carry the known one forward...
+        merged = merge_known_summer_holidays([], known)
+        assert merged == events, merged
+        print("OK: merge_known_summer_holidays carries forward an undivided holiday")
+
+        # ...but a freshly re-derived holiday for the same start date should
+        # win, not be duplicated alongside the stale carried-forward one.
+        fresh = [("Summer holidays", date(2026, 7, 17), date(2026, 9, 7))]
+        merged = merge_known_summer_holidays(fresh, known)
+        assert merged == fresh, merged
+        print("OK: merge_known_summer_holidays doesn't duplicate a re-derived holiday")
+    finally:
+        os.unlink(path)
+
+
 def check_find_pdf_links_matches_href_or_text():
     html = """
     <a href="/files/2028-05/dates.pdf">Term Dates 2028-29 (12 KB)</a>
@@ -188,5 +223,6 @@ if __name__ == "__main__":
     check_academic_year_window()
     check_add_summer_holidays()
     check_add_summer_holidays_across_real_fixtures()
+    check_load_and_merge_known_summer_holidays()
     check_find_pdf_links_matches_href_or_text()
     print("All tests passed.")
