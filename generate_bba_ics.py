@@ -1,5 +1,6 @@
 # generate_ics.py
 import io
+import os
 import re
 import sys
 import time
@@ -241,6 +242,38 @@ def add_summer_holidays(events):
     return events + holidays
 
 
+def load_known_summer_holidays(path):
+    """Recover "Summer holidays" events from the ics file already on disk
+    (the previous run's committed output).
+
+    add_summer_holidays() can only bridge a summer break while both the
+    outgoing and incoming academic years' PDFs are linked from the school's
+    site at once. Once the outgoing year's PDF is taken down - which
+    happens shortly after that summer holiday begins - the bridge can no
+    longer be derived from that day's scrape. Carrying forward whatever was
+    already captured keeps it from vanishing on the next run.
+    """
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        try:
+            cal = Calendar(f.read())
+        except Exception:
+            return []
+    return [
+        ("Summer holidays", e.begin.date(), (e.end - timedelta(days=1)).date())
+        for e in cal.events
+        if e.name == "Summer holidays"
+    ]
+
+
+def merge_known_summer_holidays(events, known_holidays):
+    """Add back any previously-captured summer holidays not already
+    re-derived for that same start date in this run's fresh events."""
+    derived_starts = {s for title, s, e in events if title == "Summer holidays"}
+    return events + [h for h in known_holidays if h[1] not in derived_starts]
+
+
 def build_calendar(events):
     cal = Calendar()
     seen = set()
@@ -312,6 +345,7 @@ def main():
         all_events.extend(events)
 
     all_events = add_summer_holidays(all_events)
+    all_events = merge_known_summer_holidays(all_events, load_known_summer_holidays(OUT_ICS))
     cal = build_calendar(all_events)
     with open(OUT_ICS, "w", encoding="utf-8") as f:
         f.writelines(cal)
